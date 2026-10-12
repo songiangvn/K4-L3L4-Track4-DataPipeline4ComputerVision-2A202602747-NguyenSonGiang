@@ -13,8 +13,8 @@
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `7e8e0335cc37`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: **733 / 130 / 156** (tổng 1019 khung; trip 18 / 4 / 4)
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -110,11 +110,11 @@ MSSV được trộn vào cách xếp trip: `row_number() over (partition by dri
 
 `manifest.json` của dataset `7e8e0335cc37` (1019 khung: train 733 / val 130 / test 156; drive_a 436, drive_b 583) ghi phần `lineage` như sau:
 - Từ hai video gốc, nhận diện bằng sha256: drive_a `636ba1a98dfc5ba6…e7e9aa`, drive_b `bfa62703f645ff77…bbee9fdc`.
-- Từ các bảng Delta ở đúng các phiên bản: `bronze.raw_telemetry_a` v0, `bronze.raw_telemetry_b` v0, `bronze.trips_raw` v0, `bronze.video_files` v1, `silver.telemetry` v0, `silver.frames` **v27**, `silver.frames_flagged` v0, `silver.frame_telemetry` v0.
+- Từ các bảng Delta ở đúng các phiên bản: `bronze.raw_telemetry_a` v0, `bronze.raw_telemetry_b` v0, `bronze.trips_raw` v0, `bronze.video_files` v1, `silver.telemetry` v0, `silver.frames` **v25**, `silver.frames_flagged` v0, `silver.frame_telemetry` v0 (theo lần chạy cuối `step all --reset`).
 - Theo luật: loại `is_black, is_blurry, is_near_dup, not sync_ok`; split "per trip, stratified by drive, md5 order".
 - Kèm `manifest_sha256 = ce27070a…a0163` của `manifest.parquet` (danh sách từng ảnh, split, đường dẫn).
 
-`silver.frames` ở v27 là vì 26 trip ghi 26 commit, cộng các lần chạy lại của thí nghiệm idempotent. Số phiên bản ghi lại *lịch sử*, còn nội dung thì không đổi. Ba tháng sau, muốn tái tạo đúng dataset này thì cần: (1) hai video có đúng sha256 trên và hai file CSV telemetry; (2) dùng Delta time travel đọc các bảng ở đúng phiên bản trong `lineage`; (3) cùng commit mã của `dbt/` và `pipeline/` (các ngưỡng `dark_luma=12`, `blur_var=40`, `dup_hamming=2`, `sync_tol_ms`); (4) cùng `LAB_STUDENT_ID=2A202602747`. Chạy lại xong, so `dataset_version` và `manifest_sha256` để chứng minh tái tạo đúng. Một điểm còn thiếu: manifest chưa ghi git commit của mã và các biến dbt, nên phần (3) hiện phải tự ghi chép bên ngoài.
+Ở lần chạy sạch, `silver.frames` là v25 vì 26 trip ghi 26 commit (v0..v25). Lúc mình vừa chạy xong thí nghiệm idempotent thì manifest ghi **v27** (thêm 2 lần ghi đè), nhưng `dataset_version` và `manifest_sha256` vẫn y hệt. Số phiên bản ghi lại *lịch sử*, còn băm nội dung mới chứng minh *dữ liệu* giống nhau. Ba tháng sau, muốn tái tạo đúng dataset này thì cần: (1) hai video có đúng sha256 trên và hai file CSV telemetry; (2) dùng Delta time travel đọc các bảng ở đúng phiên bản trong `lineage`; (3) cùng commit mã của `dbt/` và `pipeline/` (các ngưỡng `dark_luma=12`, `blur_var=40`, `dup_hamming=2`, `sync_tol_ms`); (4) cùng `LAB_STUDENT_ID=2A202602747`. Chạy lại xong, so `dataset_version` và `manifest_sha256` để chứng minh tái tạo đúng. Một điểm còn thiếu: manifest chưa ghi git commit của mã và các biến dbt, nên phần (3) hiện phải tự ghi chép bên ngoài.
 
 ## Bước 5 · Điều phối và phục vụ
 
@@ -150,8 +150,26 @@ Trung bình 18,2% khung bị loại (227/1246), nhưng phân bố rất lệch. 
 
 **Câu 2 (vận hành). "[2A202602747] Ty le loai theo drive va dai toc do"** (bảng): nhóm trip theo `drive_id` và dải tốc độ trung bình (`< 20`, `20-50`, `>= 50 km/h`). Kết quả: drive_a loại 32,4% ở dải < 20 km/h, 22,6% ở 20-50, 25,8% ở ≥ 50. Drive_b chỉ 10,5% và 9,2%. Kết luận: xe chạy chậm làm tăng khung trùng (đúng như dự đoán ở Câu 5), nhưng drive_a vẫn loại nhiều ngay cả ở dải nhanh. Nguyên nhân là `trip-04622` (67 km/h mà vẫn 34 khung trùng): đó là dấu hiệu **camera đứng hình**, không phải xe đứng yên. Về vận hành: một trip chạy nhanh mà tỷ lệ trùng cao là cảnh báo lỗi camera, đáng gửi alert cho đội phần cứng thay vì coi là chuyện bình thường.
 
+## Thí nghiệm riêng (điểm cộng): độ nhạy của `sync_tol_ms`
+
+Mình chạy lại `silver_frame_telemetry` và `gold_dataset_frames` với `--vars "{sync_tol_ms: X}"` (truyền qua dbt CLI, **không sửa** `dbt_project.yml`), rồi chạy lại `step all --reset` để quay về giá trị gốc 150 ms.
+
+| `sync_tol_ms` | khung mất đồng bộ (silver) | khung trong gold | khung test |
+|---|---|---|---|
+| 50 | 600 | 538 | 73 |
+| 100 | 324 | 762 | 112 |
+| **150 (gốc)** | **14** | **1019** | **156** |
+| 300 | 14 | 1019 | 156 |
+| 1000 | 11 | 1022 | 156 |
+
+Telemetry khoảng 10 Hz (trung vị 100 ms giữa hai mẫu) nên mẫu gần nhất lệch tối đa khoảng 100 ms cộng jitter. Dưới 100 ms, ngưỡng loại oan gần một nửa dataset (còn 538 khung). Từ 150 đến 300 ms kết quả không đổi, chỉ còn 14 khung nằm trong hai đoạn cảm biến mất tín hiệu khoảng 3 s (Câu 3). Ở 1000 ms, 3 khung trong đoạn mất tín hiệu được "cứu" nhưng ghép với tốc độ cũ tới 1 s, tức nhãn sai. Vậy 150 ms là lựa chọn tốt: lớn hơn chu kỳ lấy mẫu nhưng nhỏ hơn nhiều so với khoảng mất tín hiệu.
+
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: chỉ một biến `LAB_STUDENT_ID` trộn vào `md5` đã đổi hẳn split (733/130/156 thành 692/160/167 với MSSV khác) và version, trong khi tổng 1019 khung không đổi. Một "con số" (dataset_version) là đủ để kiểm chứng ai chạy gì.
+- Clear một task trong Airflow mặc định kéo theo cả downstream (8 task), và chính nhờ Delta overwrite theo predicate nên chạy lại không nhân đôi dòng nào.
+- **Chưa rõ**: verify `frozen camera` chỉ bắt 11/12 khung đứng hình. Khung còn lại có lẽ là khung đầu tiên của đoạn đứng hình, vì nó khác khung trước. Mình chưa kiểm tra kỹ.
+- **Lỗi pipeline chưa bắt được**: (1) camera đứng hình ở tốc độ cao (`trip-04622`, 67 km/h, 34/60 khung trùng) chỉ bị xử lý như khung trùng rồi loại đi, không có cảnh báo "camera hỏng". Nên đối chiếu dHash trùng với tốc độ > 0. (2) Mất tín hiệu GPS/telemetry chỉ là `warn`, không có ngưỡng tổng thời lượng. (3) Không có kiểm tra nhãn ngữ nghĩa: `lighting` của cả 26 trip đều là `Day/Clouds`, trong khi drive_b có 61 khung tối. Metadata trip và ảnh thực tế không khớp nhưng pipeline không phát hiện.
+- Trên Windows phải tắt `core.autocrlf` (CRLF làm hỏng `.sh` và hash của file bảo vệ) và đặt `MSYS_NO_PATHCONV=1` cho Git Bash.
