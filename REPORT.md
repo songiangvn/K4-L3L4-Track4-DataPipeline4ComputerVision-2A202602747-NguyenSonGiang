@@ -7,7 +7,9 @@
 | Họ và tên | Nguyễn Sơn Giang |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602747` |
 | GitHub | songiangvn |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-06570` |
+
+> Ghi chú về trip: MSSV `2A202602747` có chữ nên `int(MSSV)` trong GUIDE báo lỗi. Mình lấy 4 chữ số cuối: `2747 % 26 = 17`, và `list-trips[17]` = `trip-06570` (Airflow map_index 17).
 
 ## Kết quả cuối
 
@@ -119,18 +121,34 @@ MSSV được trộn vào cách xếp trip: `row_number() over (partition by dri
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+Đặt `LAB_FAIL_ONCE=trip-06570`, trigger `day09_reset`, rồi trigger `day09_video_pipeline` (run `manual__2026-10-12T18:56:43+00:00`):
+- **1 task đỏ**: `silver_frames` map_index **17**. Log có dòng `RuntimeError: simulated crash while extracting trip-06570; run it again` (ảnh `crash_log.png`).
+- **25 task `silver_frames`** của các trip khác vẫn **success**: mỗi trip là một mapped task độc lập nên lỗi không lan sang ngang.
+- **7 task `upstream_failed`**: `dbt_run_silver, dbt_test_silver, dbt_run_gold, dbt_test_gold, publish_lake, export_dataset, publish_warehouse` (ảnh `crash_failed_graph.png`). Cổng chặn đúng chỗ: gold không được dựng khi silver thiếu một trip.
+- Trên giao diện, mình bấm **Clear task** ở đúng `silver_frames [17]`, giữ mặc định *Downstream*. Hộp thoại báo **Affected Tasks: 8** (ảnh `crash_clear_dialog.png`). Đúng **8 task** chạy lại (1 trip + 7 task phía sau), 25 trip kia **không** chạy lại. Run chuyển xanh: 37/37 task success (ảnh `crash_rerun_green.png`).
+- **Không nhân đôi**: `silver.frames` vẫn **1246 dòng**, 1246 `frame_id` khác nhau, `trip-06570` có 45 khung. Lần ghi lại là commit Delta v25, `WRITE` với `predicate = trip_id = 'trip-06570'`, `rows_added=45`. Lần thử đầu sập *trước khi ghi* nên không để lại gì; lần thử hai ghi đè đúng partition đó.
+- `scripts/lab.sh verify` sau đó vẫn **27/27**, và `dataset_version` **không đổi**: `7e8e0335cc37`.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+1. **Giải mã video + trích khung trên một máy Airflow** (`silver_frames` chạy FFmpeg tuần tự trong container, slide 24). Riêng 2 drive × 5 phút đã mất khoảng 2 phút; 500 xe × hàng giờ video × 7 camera sẽ cần hàng nghìn giờ CPU mỗi ngày. Thay bằng: tách phần decode ra một cụm worker co giãn (Kubernetes/KubernetesExecutor hoặc Ray/Spark trên GPU với NVDEC), partition theo `vehicle/date/trip`, và **chỉ lấy mẫu khung cần thiết** (theo sự kiện, theo quãng đường) thay vì 2 khung/giây đều đặn.
+2. **DuckDB một tiến trình + dbt chạy toàn bộ mỗi lần** (slide 22). DuckDB đọc Delta trên MinIO bằng một máy, lại rebuild hết silver/gold mỗi lần chạy. Khi dữ liệu lên hàng TB/ngày thì không còn vừa RAM và thời gian. Thay bằng: engine phân tán (Spark/Databricks, Trino) với **dbt incremental** theo partition ngày/xe, và `MERGE` trên Delta/Iceberg thay vì rebuild.
+3. **Airflow dynamic mapping một task cho mỗi trip, cùng ingest theo batch file CSV** (slide 12, 23). 500 xe × khoảng 50 trip/ngày = 25 000 mapped task mỗi run: scheduler và metadata DB quá tải, mỗi trip lỗi lại phải clear tay. Thay bằng: ingest **streaming** (Kafka/Kinesis) để xe đẩy telemetry liên tục, Airflow chỉ điều phối ở mức lô (theo xe/giờ, hoặc theo sự kiện qua Datasets), có retry tự động, và theo dõi tỷ lệ quarantine theo xe thay vì nhìn từng task. Kèm theo đó, MinIO một node cũng cần thay bằng S3/object storage có lifecycle (video thô chuyển sang lớp lạnh).
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+**Câu 1. "[2A202602747] Ty le khung bi loai theo trip"** (biểu đồ cột):
+```sql
+select trip_id, drive_id, split, frames, frames_kept, frames - frames_kept as dropped,
+       round(100.0 * (frames - frames_kept) / frames, 1) as pct_dropped, round(avg_speed_kmh::numeric, 1) as avg_kmh
+from marts.mart_trip_summary order by pct_dropped desc
+```
+Trung bình 18,2% khung bị loại (227/1246), nhưng phân bố rất lệch. Năm trip bị loại nhiều nhất đều thuộc drive_a: `trip-04622` 56,7% (34/60), `trip-03904` 50,0%, `trip-02086` 46,7% (17,6 km/h), `trip-08888` 40,0% (6,5 km/h), `trip-07774` 38,2%. Đối chiếu với silver, gần như toàn bộ là **khung gần trùng**: `trip-04622` có 34 khung trùng, `trip-08888` có 24. Riêng trip sập của mình, `trip-06570` (28,9%), lại chủ yếu bị loại vì **mờ** (9 khung mờ, 4 trùng). Có ba trip bị loại 0%.
+
+**Câu 2 (vận hành). "[2A202602747] Ty le loai theo drive va dai toc do"** (bảng): nhóm trip theo `drive_id` và dải tốc độ trung bình (`< 20`, `20-50`, `>= 50 km/h`). Kết quả: drive_a loại 32,4% ở dải < 20 km/h, 22,6% ở 20-50, 25,8% ở ≥ 50. Drive_b chỉ 10,5% và 9,2%. Kết luận: xe chạy chậm làm tăng khung trùng (đúng như dự đoán ở Câu 5), nhưng drive_a vẫn loại nhiều ngay cả ở dải nhanh. Nguyên nhân là `trip-04622` (67 km/h mà vẫn 34 khung trùng): đó là dấu hiệu **camera đứng hình**, không phải xe đứng yên. Về vận hành: một trip chạy nhanh mà tỷ lệ trùng cao là cảnh báo lỗi camera, đáng gửi alert cho đội phần cứng thay vì coi là chuyện bình thường.
 
 ## Nhìn lại
 
