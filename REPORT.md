@@ -90,17 +90,29 @@ Mình chọn **ngưỡng 2** như pipeline. Ở ngưỡng 0 chỉ bắt được
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+Theo `leakage.json`: có 1019 khung hình dùng được, thuộc 26 trip. Nếu chia **theo khung hình** (ngẫu nhiên 70/15/15) thì **26/26 trip** bị chia cắt qua nhiều split, và cả **26 trip** đều có khung ở cả train lẫn test. Nếu chia **theo trip** (gold của pipeline) thì **0 trip** bị chia cắt. Test dbt chống rò rỉ và verify `no trip is in two splits` đều PASS.
+
+Điểm kiểm thử đẹp giả tạo vì pipeline lấy mẫu 2 khung/giây: hai khung liền nhau chỉ cách 0,5 s, cùng đường, cùng xe phía trước, cùng ánh sáng (bước 3 cho thấy ở ngưỡng dHash 6, 363/602 khung của A gần như giống khung trước nó). Chia theo khung thì với mỗi ảnh test, gần như chắc chắn có "anh em sinh đôi" trong train. Model chỉ cần **nhớ** cảnh chứ không cần **tổng quát hoá**, nên điểm test gần với điểm train. Khi gặp một con đường mới thật sự thì điểm tụt. Chia theo trip (theo cảnh) mô phỏng đúng tình huống triển khai: test là những chuyến model chưa từng thấy.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+`dataset_version` = 12 ký tự đầu của `sha256` trên danh sách `frame_id|split` đã sắp xếp (`publish.py`). Nó là **băm nội dung**, nên cùng nội dung thì luôn cùng version, khác dù chỉ một khung hay một split thì version khác. Ngày giờ thì đổi mỗi lần chạy dù dữ liệu y hệt. Số đếm thì phụ thuộc thứ tự chạy và máy chạy (máy giảng viên chạy lại sẽ ra số khác). Cả hai đều không trả lời được câu "hai dataset này có giống nhau không?".
+
+Hai lần chạy liên tiếp: `step 4` cho `7e8e0335cc37`, chạy lại `cli export-dataset` vẫn ra **`7e8e0335cc37`**, và lần chạy đầu `step all --reset` cũng ra đúng số đó. Version không phụ thuộc giờ chạy.
+
+MSSV được trộn vào cách xếp trip: `row_number() over (partition by drive_id order by md5(trip_id || LAB_STUDENT_ID))` trong `gold_dataset_frames.sql`. Thứ tự trip quyết định trip nào vào train/val/test, nên đổi MSSV thì đổi split, đổi nội dung, và đổi version. Mình thử đổi tạm sang `2A202602748`: ra version **`fedabb0286ef`** với train/val/test = 692/160/167 khung. Đặt lại `2A202602747` thì quay về **`7e8e0335cc37`** với 733/130/156. Tổng khung (1019) và số trip mỗi split (18/4/4) không đổi, chỉ đổi *trip nào* ở đâu. Vì vậy bạn bè cùng dữ liệu vẫn có version khác mình, và giảng viên dùng version để xác nhận bài chạy đúng với MSSV.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+`manifest.json` của dataset `7e8e0335cc37` (1019 khung: train 733 / val 130 / test 156; drive_a 436, drive_b 583) ghi phần `lineage` như sau:
+- Từ hai video gốc, nhận diện bằng sha256: drive_a `636ba1a98dfc5ba6…e7e9aa`, drive_b `bfa62703f645ff77…bbee9fdc`.
+- Từ các bảng Delta ở đúng các phiên bản: `bronze.raw_telemetry_a` v0, `bronze.raw_telemetry_b` v0, `bronze.trips_raw` v0, `bronze.video_files` v1, `silver.telemetry` v0, `silver.frames` **v27**, `silver.frames_flagged` v0, `silver.frame_telemetry` v0.
+- Theo luật: loại `is_black, is_blurry, is_near_dup, not sync_ok`; split "per trip, stratified by drive, md5 order".
+- Kèm `manifest_sha256 = ce27070a…a0163` của `manifest.parquet` (danh sách từng ảnh, split, đường dẫn).
+
+`silver.frames` ở v27 là vì 26 trip ghi 26 commit, cộng các lần chạy lại của thí nghiệm idempotent. Số phiên bản ghi lại *lịch sử*, còn nội dung thì không đổi. Ba tháng sau, muốn tái tạo đúng dataset này thì cần: (1) hai video có đúng sha256 trên và hai file CSV telemetry; (2) dùng Delta time travel đọc các bảng ở đúng phiên bản trong `lineage`; (3) cùng commit mã của `dbt/` và `pipeline/` (các ngưỡng `dark_luma=12`, `blur_var=40`, `dup_hamming=2`, `sync_tol_ms`); (4) cùng `LAB_STUDENT_ID=2A202602747`. Chạy lại xong, so `dataset_version` và `manifest_sha256` để chứng minh tái tạo đúng. Một điểm còn thiếu: manifest chưa ghi git commit của mã và các biến dbt, nên phần (3) hiện phải tự ghi chép bên ngoài.
 
 ## Bước 5 · Điều phối và phục vụ
 
