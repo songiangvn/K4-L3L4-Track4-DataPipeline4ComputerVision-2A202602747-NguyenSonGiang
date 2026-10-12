@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
+| Họ và tên | Nguyễn Sơn Giang |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602747` |
+| GitHub | songiangvn |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
 
 ## Kết quả cuối
@@ -21,7 +21,14 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Khác biệt giữa A và B mà mình thấy trong bronze (2 dòng đầu mỗi bảng, A có 3021 dòng, B có 3234 dòng):
+1. **Tên cột**: A dùng `ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer`. B dùng `timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering`.
+2. **Đơn vị tốc độ**: A tính bằng m/s (`1.213`), B tính bằng km/h (`55.11`).
+3. **Kiểu thời gian**: A là chuỗi ISO UTC (`2025-10-07T08:00:00.014Z`), B là epoch mili-giây (`1759933801509`).
+4. **Bàn đạp**: A là tỷ lệ 0..1 (`gas=0.028`), B là phần trăm (`throttle_pct=2.0`).
+5. **Đồng hồ**: `bronze.video_files` ghi `telemetry_clock_offset_ms` = 0 cho drive_a và **1500** cho drive_b. Mẫu đầu tiên của B là `1759933801509` = 14:30:01.509 UTC, trong khi video B bắt đầu lúc 14:30:00, tức đồng hồ thiết bị B chạy nhanh khoảng 1,5 s.
+
+Mỗi nguồn có bảng bronze riêng vì hai schema khác nhau. Nếu gộp ngay thì phải chọn tên cột và đơn vị chung ở bước ingest, mà bước đó không biết hết luật chuyển đổi. Mọi cột được giữ ở dạng chữ để bronze là **bản sao trung thực** của file nguồn: ô trống, giá trị vô lý hay sai định dạng đều được giữ nguyên chứ không vỡ lúc nạp. Khi luật ép kiểu ở silver sai, ta chỉ cần sửa dbt rồi chạy lại từ bronze, không phải ingest lại. Bronze cũng chỉ thêm và idempotent: nạp mỗi drive hai lần thì lần hai báo `already present` (nhận diện bằng sha256), và `history bronze.raw_telemetry_a` chỉ có **1 commit** (version 0, `rows_added=3021`).
 
 ## Bước 2 · Silver telemetry
 
