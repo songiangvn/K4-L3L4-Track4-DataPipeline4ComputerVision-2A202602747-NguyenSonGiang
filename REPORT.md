@@ -63,18 +63,27 @@ Thí nghiệm `break-gate` (`break_gate.json`): nới `max_speed_mps` từ 70 l�
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+Kết quả `idempotency.json` (trip `trip-00003`, 60 khung):
+- Trước khi chạy lại: `silver.frames` có **1246 dòng**, dấu vân tay `6c7480dfde7e`.
+- Sau **2 lần chạy lại** partition đó: vẫn **1246 dòng**, dấu vân tay vẫn `6c7480dfde7e` (`unchanged=true`).
+- Khi ghi kiểu `append` sai cách, chạy 2 lần cho cùng trip: **120 dòng** cho một trip chỉ có 60 khung, tức dữ liệu bị nhân đôi.
+
+`frames.py` ghi bằng `mode="overwrite", predicate="trip_id = '<trip>'"`. Delta làm việc này trong **một commit nguyên tử**: đánh dấu các file cũ của trip là đã xoá và thêm file mới vào cùng một mục transaction log. Người đọc chỉ thấy phiên bản cũ hoặc phiên bản mới, không bao giờ thấy trạng thái nửa vời. Nếu "xoá rồi ghi lại" thành hai thao tác và job sập giữa chừng (sau khi xoá, trước khi ghi), trip đó sẽ **mất dữ liệu** cho tới lần chạy sau, và downstream (gold) có thể đọc đúng lúc đó. Với Delta, sập giữa chừng chỉ để lại vài file Parquet mồ côi chưa được commit. Bảng vẫn ở phiên bản cũ, chạy lại thì cho đúng kết quả, và nếu cần vẫn có time travel để quay về.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
+Pipeline phân biệt bằng độ sáng trung bình (luma): **đen** là `brightness < 12` (`dark_luma`), **tối** là `12 ≤ brightness < 40` (`dark_soft`). Khung đen là lỗi cảm biến hoặc lỗi truyền, không có thông tin, nên bị loại khỏi gold (drive A có 6, B có 4, verify bắt 6/6 và 4/4). Khung tối là **điều kiện lái thật** (hầm, bóng râm, chạng vạng). Nó chỉ được gắn cờ `is_dark` và **giữ lại**: drive A giữ 4, drive B giữ **61** khung tối. Mình đồng ý: nếu bỏ khung tối thì model sẽ không bao giờ học cảnh hầm và đúng ở chỗ nguy hiểm nhất thì model mù. Cờ vẫn có ích để cân bằng hoặc phân tích theo điều kiện ánh sáng. Một điểm cần lưu ý: luật mờ chỉ áp khi `brightness ≥ 12`, nên khung đen không bị tính trùng là mờ.
+
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+(Tổng: A 602 khung, B 644 khung. Ở ngưỡng 8 thì A bị coi là trùng 438 khung, B 348.)
+
+Mình chọn **ngưỡng 2** như pipeline. Ở ngưỡng 0 chỉ bắt được khung giống hệt bit (61 ở A), bỏ sót đoạn camera đứng hình có nhiễu nén nhẹ. Từ ngưỡng 4 trở lên số khung "trùng" tăng vọt (A: 269, rồi 363 ở ngưỡng 6, tức 60% drive), nghĩa là đã loại cả khung khác nhau thật khi xe di chuyển chậm. Ngưỡng phụ thuộc tốc độ: drive A trung bình 38 km/h và 15% thời gian dưới 7 km/h, nên hai khung cách 0,5 s gần như giống nhau và tỷ lệ trùng cao (149/602). Drive B trung bình 71 km/h, cảnh đổi nhanh, nên ít trùng (53/644). Khi triển khai rộng, nên chọn ngưỡng **theo tốc độ** (hoặc lấy mẫu theo quãng đường thay vì theo thời gian) thay vì một hằng số.
 
 ## Bước 4 · Gold
 
